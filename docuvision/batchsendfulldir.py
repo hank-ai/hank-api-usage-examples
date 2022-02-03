@@ -23,9 +23,48 @@
 
 import pandas as pd
 import numpy as np
-import requests
-import json, os, logging, sys, datetime, argparse
+import requests, hashlib, json, os, logging, sys, datetime, argparse
 from pathlib import Path
+from encodings.base64_codec import base64
+
+#expects filepath to be a Path() object
+#timeout is in seconds
+def hankai_submit_job(filepath, timeout=10):
+    with open(file, 'rb') as f:
+        raw_bytes = f.read()
+        enc_bytes = base64.encodebytes(raw_bytes)
+    enc_string = enc_bytes.decode("utf-8")
+    md5_sum = hashlib.md5(raw_bytes).hexdigest()
+    
+    req = {
+        "name": "customername_job_x",
+        "request": {
+            "securityToken": APITOKEN,
+            "document": {
+                "name": filepath.name,
+                "dataType": "blob",
+                "encodingType": "base64/utf-8",
+                "mimeType": filepath.suffix,
+                "model": "base-medrec-anesthesia", #modify this to the model you want to consume
+                "confidenceInterval": 0.7, #modify this to your liking
+                "isPerformOCR": True, #if set your result will have OCR'd words and bounding boxes
+                "sizeBytes": len(enc_bytes),
+                "md5Sum": md5_sum,
+                "data": enc_string,
+            }
+        }
+    }
+    
+    resp = requests.request(
+        method="POST",
+        url=f"{APIADDRESS}docuvision/v1/tasks",
+        data=json.dumps(req),
+        timeout=timeout
+    )
+    rjson = json.loads(resp.content)
+    print(resp.content)
+    req_id = rjson.get("id")
+    logging.info(f"Job posted (id={req_id}). Filename={filepath.name}")
 
 #setup logging
 logging.basicConfig(
@@ -36,8 +75,8 @@ logging.basicConfig(
 logging.info("STARTING NEW JOB. {}".format(datetime.datetime.now()))
 
 #make sure token and address are set in env vars
-os.environ['DOCUVISION_API_TOKEN'] = 'abc'
-os.environ['DOCUVISION_API_ADDRESS'] = 'https://api.hank.ai/docuvision/'
+os.environ['DOCUVISION_API_TOKEN'] = 'hankai_2020'
+os.environ['DOCUVISION_API_ADDRESS'] = "https://ajy0m5kz2m.execute-api.us-east-1.amazonaws.com/prod/"
 APITOKEN = os.environ.get('DOCUVISION_API_TOKEN', None)
 APIADDRESS = os.environ.get('DOCUVISION_API_ADDRESS', None)
 if APITOKEN is None:
@@ -54,105 +93,58 @@ ap.add_argument("--types", help="pdf, png, or jpg. may include up to all 3 seper
 ap.add_argument("--dir", help="full path to a directory on the current machine to process", 
     default=".", type=str)
 args, unknown = ap.parse_known_args()
-types = args.types
-dir = args.dir
-logging.info("Processing {} filetypes in {} ...".format(types, dir))
+if args.dir == '.': args.dir=os.path.dirname(os.path.realpath(__file__))
+logging.info("Processing {} filetypes in {} ...".format(args.types, args.dir))
 
-dirP = Path(dir)
-for type in types.split(','):
-    files = list(dirP.rglob("*.{type}"))
+### WIP ###
+def hankai_get_results(jobid):    
+    req_in_prog = True
+    for i in range(max_retries):
+        time.sleep(retry_delay)
+        result = requests.request(
+            method="GET",
+            url=f"{base_url}docuvision/v1/tasks/{req_id}",
+        )
+        result_content = json.loads(result.content)
+        print(f"Attempt {i + 1 }state: {result_content.get('state')}")
+        if (result_content.get("state") and result_content.get("state") != "In-Progress"):
+            break
+    
+    print("\n\nresponse received:\n\n")
+    for key, val in result_content.items():
+        if not key == "request":
+            print(f"{key}: {val}")
+
+#go through each filetype in the directory, recursively (thus rglob), and send files to the api
+dirP = Path(args.dir+'/')
+for type in args.types.split(','):
+    files = list(dirP.rglob(f"*.{type}"))
     logging.info("Processing {:,} {} ...".format(len(files), type))
-
+    for file in files:
+        resp = hankai_submit_job(file)
+        #handle polling for results next 
 
 logging.info("JOB COMPLETED")
 
 #%%
 def hankai_submit_job(request, maxretries=10):
-    subkey = "b9c2b66b0c7b4e5788aa7a1b7ec7922c"
-    endpoint = "https://cognitiveservices-docvision.cognitiveservices.azure.com/"
-    from azure.cognitiveservices.vision.computervision import ComputerVisionClient
-    from azure.cognitiveservices.vision.computervision.models import OperationStatusCodes
-    from azure.cognitiveservices.vision.computervision.models import VisualFeatureTypes
-    from msrest.authentication import CognitiveServicesCredentials
-    from azure.cognitiveservices.vision.computervision.operations import ComputerVisionClientOperationsMixin
-
     import time
-    wordRects = []
-    lineRects = []
-    meta = {}
-    rdict = {'meta':{}, 'lines': [], 'words':[]}
-    #print("Getting OCR results from azure ...")
+ 
+ 
+img_or_pdf_path = "C:/tmp/test-out/BetheaJanieMMRN000017902_pg1.png"
+mime_type = "png"
+base_url = "https://docuvision-api.hank.ai/"
+max_retries, retry_delay  = 60, 5.0 # 60 total retries x 5 sec delay per retry = 5 minutes
+ 
 
-    computervision_client = ComputerVisionClient(endpoint, CognitiveServicesCredentials(subkey))
-    errorcount = 0 #limit tries to 5 if error is encountered (typically related to too many requests too quickly)
-    while errorcount<maxretries:
-        try:
-            with open(imgpath, 'rb') as f:
-                recognize_results = computervision_client.read_in_stream(f, raw=True)
-            break
-        except Exception as e:
-            errorcount+=1
-            if str(e).find('Too Many Requests')>=0: 
-                print("   -> Too Many Requests to azure ocr read_in_stream. waiting 2 seconds then trying again (tries={:,})".format(errorcount))
-                time.sleep(2)
-            else:
-                print("   -> Error requesting azure ocr read_in_stream. ({}). waiting 2 seconds then trying again (tries={:,})".format(e, errorcount))
-                time.sleep(2)
+ 
+resp = requests.request(
+    method="POST",
+    url=f"{base_url}docuvision/v1/tasks/",
+    data=json.dumps(test_req),
+    timeout=10,
+)
+req_content = json.loads(resp.content)
+req_id = req_content.get("id")
+print(f"request id: {req_id}")
 
-    if maxretries==errorcount: 
-        return rdict
-
-    oplocrem = recognize_results.headers['Operation-Location']
-    opid = oplocrem.split("/")[-1]
-    getres=None
-    errorcount=0
-    while True and errorcount<maxretries:
-        try:
-            getres = computervision_client.get_read_result(opid)
-            if getres.status not in ['notStarted','running']:
-                #print("problem. ", getres.status)
-                break
-            time.sleep(0.8)
-        except Exception as e:
-            errorcount+=1
-            if str(e).find('Too Many Requests')>=0: 
-                print("   -> Too Many Requests to azure ocr get_read_result. waiting 2 seconds then trying again (tries={:,})".format(errorcount))
-                time.sleep(2)
-            else:
-                print("   -> Error requesting azure ocr get_read_result. ({}). waiting 2 seconds then trying again (tries={:,})".format(e, errorcount))
-                time.sleep(2)
-
-    if getres is None:
-        print("Never got a succeeded response status code from azure ocr. gonna move along ...")
-    elif getres.status == OperationStatusCodes.succeeded:
-        if len(getres.analyze_result.read_results)==0:
-            print("No results returned from azure.")
-
-        for text_result in getres.analyze_result.read_results:
-            meta = {'angle': text_result.angle, 'width':text_result.width, 'height':text_result.height, 'unit':text_result.unit, 'language':text_result.language}
-            for line in text_result.lines:
-                lineWordRects = []
-                bb = line.bounding_box
-                #convert polygon coords to rectangle coords
-                #[0tlx, 1tly, 2trx, 3try, 4brx, 5bry, 6blx, 7bly]
-                l = min(bb[0], bb[6])
-                t = min(bb[1], bb[3])
-                h = max(bb[5], bb[7]) - t
-                w = max(bb[2], bb[4]) - l
-                lineRect = Rectangle(l, t, w, h, yfrom='top', pageWidth=text_result.width, pageHeight=text_result.height)
-                for word in line.words:
-                    #print(word.text)
-                    #print(word.bounding_box)
-                    bb = word.bounding_box
-
-                    #convert polygon coords to rectangle coords
-                    #[0tlx, 1tly, 2trx, 3try, 4brx, 5bry, 6blx, 7bly]
-                    l = min(bb[0], bb[6])
-                    t = min(bb[1], bb[3])
-                    h = max(bb[5], bb[7]) - t
-                    w = max(bb[2], bb[4]) - l
-                    lineWordRects.append(((Rectangle(l, t, w, h, yfrom='top', pageWidth=text_result.width, pageHeight=text_result.height), word.text, word, line, meta)))
-                rdict['words'] += lineWordRects
-                rdict['lines'].append((lineRect, line.text, line, lineWordRects, meta))
-            rdict['meta'] = meta
-    return rdict
