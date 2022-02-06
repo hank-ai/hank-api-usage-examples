@@ -15,6 +15,7 @@
 #   - Set 'DOCUVISION_API_TOKEN' to the token given to you by hank.ai during signup
 #   - Set 'DOCUVISION_API_ADDRESS' to the url given to you by hank.ai during signup
 # - Python 3.7.7 or greater installed
+#   - boto3 'pip install boto3' (this is aws' library for interacting with s3. needed for uploading files to the signed url returned by first api call)
 # Args: (command line args. ex: python batchsendfulldir.py --types pdf --dir c:/test/ --loglevel DEBUG)
 # - --types: pdf, png, or jpg. may include up to all 3 seperated by a comma. default=pdf,jpg,png
 # - --dir: full path to a directory on the current machine you'd like to post to DocuVision API. default=current directory
@@ -23,6 +24,12 @@
 # - will save a .json file alongside each item posted to the DocuVision API once results are received
 # - will append logging info to docuvision.log in same dir as this script is run from
 # - will save any pending jobs that are still in progress or have not resulted by the end of the script as (jobid filepath) lines in pendingjobs.docuvision
+
+# Resources:
+# AWS S3 Presigned URL Upload Tutorial in Python
+#   https://beabetterdev.com/2021/09/30/aws-s3-presigned-url-upload-tutorial-in-python/
+#
+
 
 import requests, hashlib, json, os, logging, sys, datetime, argparse, time
 from pathlib import Path
@@ -62,6 +69,7 @@ logging.info("Processing {} filetypes in {} ...".format(args.types, args.dir))
 APIADDRESS = os.environ.get('DOCUVISION_API_ADDRESS', 
     "https://services.hank.ai/docuvision/v1/tasks/") #PROD
     #"https://services-dev.hank.ai/docuvision/v1/tasks/") #DEV
+APIADDRESS_GETSIGNEDURL = "https://services.hank.ai/docuvision/v1/getsignedposturl/"
 
 APITOKEN = os.environ.get('DOCUVISION_API_TOKEN', None)
 if APITOKEN is None:
@@ -74,6 +82,44 @@ if APIADDRESS[-1] != "/": APIADDRESS+="/"
 logging.info("APIADDRESS loaded. Using {}".format(APIADDRESS))
 logging.info("APITOKEN loaded. Using {}...".format(APITOKEN[:15]))
 
+#returns a presigned s3 bucket url that a file can be posted to
+def hankai_get_presigned_url(timeout=20):
+    surl = None
+    try:
+        headers = {"x-api-key": APITOKEN }
+        req = {
+            "filename": filepath.name
+        }
+        resp = None
+        resp = requests.request(
+            method="POST",
+            url=f"{APIADDRESS_GETSIGNEDURL}", #docuvision/v1/tasks/7",
+            headers=headers,
+            timeout=timeout
+        )
+        rjson = json.loads(resp.content)
+        surl = rjson.get("presignedurl")
+    except Exception as e:
+        logging.error("in hankai_get_presigned_url()", e)
+    return surl
+
+#will post a file given by filepath (a Path object) to a 
+# presigned url (string, retrieved from hankai_get_presigned_url()) from s3
+#returns 1 if successful (i.e. status code==200) or 0 if other status code or error caught
+def hankai_post_file(filepath, presignedurl, timeout=120):
+    try:
+        files = {'file': open(filepath, 'rb')}
+        resp = None
+        resp = requests.post(
+            url=f"{presignedurl}", #docuvision/v1/tasks/7",
+            files=files,
+            timeout=timeout
+        )
+        if resp.status_code==200:
+            return 1
+    except Exception as e:
+        logging.error(f"posting {filepath.name} to {presignedurl}", e)
+    return 0    
 
 #expects filepath to be a Path() object
 #timeout is in seconds
@@ -81,7 +127,7 @@ logging.info("APITOKEN loaded. Using {}...".format(APITOKEN[:15]))
 #returns job id (int)
 def hankai_submit_job(filepath, timeout=60):
     try:
-        with open(file, 'rb') as f:
+        with open(filepath, 'rb') as f:
             raw_bytes = f.read()
             enc_bytes = base64.encodebytes(raw_bytes)
         enc_string = enc_bytes.decode("utf-8")
