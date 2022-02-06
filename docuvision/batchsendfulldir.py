@@ -47,6 +47,8 @@ ap.add_argument("--confidence", help="confidence level for the docuvision api. w
     default="0.80", type=str)
 ap.add_argument("--model", help="pass a specific docuvision model to consume", 
     default="base-medrec-anesthesia", type=str)
+ap.add_argument("--reprocess", help="if set, will reprocess all files in the given directory even if they have already been processed", 
+    default=0, type=int)
 ap.add_argument("--loglevel", help="Logging level. Options are DEBUG, INFO, WARNING, ERROR, CRITICAL.", 
     default="DEBUG", type=str)
 
@@ -82,7 +84,8 @@ if APIADDRESS[-1] != "/": APIADDRESS+="/"
 logging.info("APIADDRESS loaded. Using {}".format(APIADDRESS))
 logging.info("APITOKEN loaded. Using {}...".format(APITOKEN[:15]))
 
-#returns a presigned s3 bucket url that a file can be posted to
+#STEP 1.
+# returns a presigned s3 bucket url that a file can be posted to
 def hankai_get_presigned_url(timeout=20):
     surl = None
     try:
@@ -103,9 +106,10 @@ def hankai_get_presigned_url(timeout=20):
         logging.error("in hankai_get_presigned_url()", e)
     return surl
 
-#will post a file given by filepath (a Path object) to a 
-# presigned url (string, retrieved from hankai_get_presigned_url()) from s3
-#returns 1 if successful (i.e. status code==200) or 0 if other status code or error caught
+#STEP 2.
+# will post a file given by filepath (a Path object) to a 
+#  presigned url (string, retrieved from hankai_get_presigned_url()) from s3
+# returns 1 if successful (i.e. status code==200) or 0 if other status code or error caught
 def hankai_post_file(filepath, presignedurl, timeout=120):
     try:
         files = {'file': open(filepath, 'rb')}
@@ -117,14 +121,17 @@ def hankai_post_file(filepath, presignedurl, timeout=120):
         )
         if resp.status_code==200:
             return 1
+        else: logging.warning(f"Bad status code ({resp.status_code}) when uploading {filepath.name}.")
     except Exception as e:
         logging.error(f"posting {filepath.name} to {presignedurl}", e)
     return 0    
 
-#expects filepath to be a Path() object
-#timeout is in seconds
-#writes the newly created 'jobid filepath' as a line in pendingjobs.docuvision file in current directory
-#returns job id (int)
+#STEP 3.
+# submits the job to the api after having successfully uploaded the file to process to s3 in prior 2 steps
+# expects filepath to be a Path() object
+# timeout is in seconds
+# writes the newly created 'jobid filepath' as a line in pendingjobs.docuvision file in current directory
+# returns job id (int)
 def hankai_submit_job(filepath, timeout=60):
     try:
         with open(filepath, 'rb') as f:
@@ -173,6 +180,7 @@ def hankai_submit_job(filepath, timeout=60):
         logging.error(f"{e}. {resp}")
     return None
 
+#STEP 4.
 #gets the api response for a given jobid
 def hankai_get_results(jobid):
     logging.debug("Getting {}{}".format(APIADDRESS, jobid))
@@ -184,6 +192,7 @@ def hankai_get_results(jobid):
     )
     return resp
 
+#STEP 5.
 #returns 'completed' if the job is complete, 'inprogress' if not found or in progress, or 'error' if completed but state == error
 def hankai_check_job_complete(jobid, resp):
     try:
@@ -199,6 +208,7 @@ def hankai_check_job_complete(jobid, resp):
         logging.error(f"in hank_check_job_complete(resp). error={e} resp={resp}")
     return "inprogress"
 
+#STEP 6.
 #writes out the results to a .json file of the form filestem+_jobid.completedstate.json at same location as original file
 def hankai_write_json_results(jobid, document_filepath, apiresponse, completedstate):
     dfP = Path(document_filepath)
@@ -208,6 +218,13 @@ def hankai_write_json_results(jobid, document_filepath, apiresponse, completedst
         jsonapir = json.loads(apiresponse.content)
         jsonapir['metadata']['apiKey']="{}...".format(jsonapir['metadata']['apiKey'][:15])
         json.dump(jsonapir, f, indent=2)
+
+#checks if a filepathstem_xxx.completed.json file exists for a given file
+def checkForCompletedJson(filepath):
+    jsonps = filepath.parent.rglob("{}*.json".format(filepath.stem))
+    for jsonp in jsonps:
+        if jsonp.stem.endswith('.completed'): return 1
+    return 0
 
 #%% SUBMIT JOBS
 if args.wtd.upper() in ['POST','BOTH']:
@@ -219,7 +236,17 @@ if args.wtd.upper() in ['POST','BOTH']:
         files = list(dirP.rglob(f"*.{type}"))
         logging.info("Processing {:,} {}s in {} ...".format(len(files), type, args.dir))
         for file in files:
+            # if we weren't asked to reprocess all files AND if a completed json file already exists, move on to next file for processing
+            if not args.reprocess and checkForCompletedJson(file):
+                logging.debug(f"Skipping already processed file {file.name}")
+                continue
             logging.info(f"Processing {file.name}")
+            #step 1. get presigned url for s3 file upload
+            surl = hankai_get_presigned_url()
+            if surl is None: continue #failed to get signed url. go to next file
+            #step 2.
+            if not hankai_post_file(file, surl): continue #failed to post file to signed url. go to next file
+            #step 3. 
             jobid = hankai_submit_job(file)
             if jobid is not None:
                 newjobids.append(jobid)
