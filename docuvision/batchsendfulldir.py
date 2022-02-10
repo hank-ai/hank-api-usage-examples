@@ -44,7 +44,7 @@ ap.add_argument("--types", help="pdf, png, or jpg. may include up to all 3 seper
 ap.add_argument("--dir", help="full path to a directory on the current machine to process", 
     default=".", type=str)
 ap.add_argument("--confidence", help="confidence level for the docuvision api. will only return fields with a confidence >= this float.", 
-    default="0.80", type=str)
+    default="0.9", type=str)
 ap.add_argument("--model", help="pass a specific docuvision model to consume", 
     default="base-medrec-anesthesia", type=str)
 ap.add_argument("--reprocess", help="if set, will reprocess all files in the given directory even if they have already been processed", 
@@ -69,11 +69,12 @@ logging.info("Processing {} filetypes in {} ...".format(args.types, args.dir))
 #%% SETUP AUTH
 #make sure token and address are set in env vars (will use the default address here if not)
 APIADDRESS = os.environ.get('DOCUVISION_API_ADDRESS', 
-    "https://services.hank.ai/docuvision/v1/tasks/") #PROD
-    #"https://services-dev.hank.ai/docuvision/v1/tasks/") #DEV
-APIADDRESS_GETSIGNEDURL = "https://services.hank.ai/docuvision/v1/getsignedposturl/"
+    #https://services.hank.ai/docuvision/v1/") #PROD
+    "https://services-dev.hank.ai/docuvision/v1/") #DEV
 
-APITOKEN = os.environ.get('DOCUVISION_API_TOKEN', None)
+#APITOKEN = os.environ.get('DOCUVISION_API_TOKEN', None) #PROD
+APITOKEN = os.environ.get('DOCUVISION_API_TOKEN_DEV', None) #DEV
+
 if APITOKEN is None:
     logging.error("DOCUVISION_API_TOKEN environment variable is not set. Aborting")
     sys.exit()
@@ -84,97 +85,92 @@ if APIADDRESS[-1] != "/": APIADDRESS+="/"
 logging.info("APIADDRESS loaded. Using {}".format(APIADDRESS))
 logging.info("APITOKEN loaded. Using {}...".format(APITOKEN[:15]))
 
+
 #STEP 1.
 # returns a presigned s3 bucket url that a file can be posted to
 def hankai_get_presigned_url(timeout=20):
-    surl = None
+    presignedurl_details = None
     try:
         headers = {"x-api-key": APITOKEN }
-        req = {
-            "filename": filepath.name
-        }
         resp = None
         resp = requests.request(
             method="POST",
-            url=f"{APIADDRESS_GETSIGNEDURL}", #docuvision/v1/tasks/7",
+            url=f"{APIADDRESS}upload-locations", #docuvision/v1/tasks/7",
             headers=headers,
             timeout=timeout
         )
-        rjson = json.loads(resp.content)
-        surl = rjson.get("presignedurl")
+        presignedurl_details = resp.json()
+        logging.debug(f"Signed url for upload acquired, status code {resp.status_code}, details={presignedurl_details}")
     except Exception as e:
         logging.error("in hankai_get_presigned_url()", e)
-    return surl
+    return presignedurl_details
 
 #STEP 2.
-# will post a file given by filepath (a Path object) to a 
-#  presigned url (string, retrieved from hankai_get_presigned_url()) from s3
+# will post a file to a presigned s3 url
+# dv_file to be a dictionary as created by loadFile() function
+# presigned_url (json object, retrieved from hankai_get_presigned_url()) from s3
 # returns 1 if successful (i.e. status code==200) or 0 if other status code or error caught
-def hankai_post_file(filepath, presignedurl, timeout=120):
+def hankai_post_file(dv_file, presignedurl_details, timeout=120):
     try:
-        files = {'file': open(filepath, 'rb')}
+        files = {'file': dv_file['base64encoded']}
         resp = None
         resp = requests.post(
-            url=f"{presignedurl}", #docuvision/v1/tasks/7",
+            url=presignedurl_details.get('url'), #docuvision/v1/tasks/7",
+            data=presignedurl_details.get('fields'),
             files=files,
             timeout=timeout
         )
-        if resp.status_code==200:
+        if resp.status_code<300:
             return 1
-        else: logging.warning(f"Bad status code ({resp.status_code}) when uploading {filepath.name}.")
+        else: logging.warning(f"Bad status code ({resp.status_code}) when uploading {dv_file['filepath'].name}. {resp.content}")
     except Exception as e:
-        logging.error(f"posting {filepath.name} to {presignedurl}", e)
+        logging.error(f"posting {dv_file['filepath'].name} to {presignedurl_details}", e)
     return 0    
 
 #STEP 3.
 # submits the job to the api after having successfully uploaded the file to process to s3 in prior 2 steps
-# expects filepath to be a Path() object
+# expects dv_file to be a dictionary as created by loadFile() function
 # timeout is in seconds
 # writes the newly created 'jobid filepath' as a line in pendingjobs.docuvision file in current directory
 # returns job id (int)
-def hankai_submit_job(filepath, timeout=60):
+def hankai_submit_job(dv_file, presignedurl_details, args, timeout=60):
     try:
-        with open(filepath, 'rb') as f:
-            raw_bytes = f.read()
-            enc_bytes = base64.encodebytes(raw_bytes)
-        enc_string = enc_bytes.decode("utf-8")
-        md5_sum = hashlib.md5(raw_bytes).hexdigest()
         headers = {"x-api-key": APITOKEN }
         req = {
-            "name": "customername_job_x",
+            #"name": "customername_job_x",
             "request": {
                 "document": {
-                    "name": filepath.name,
+                    "name": dv_file.get('filepath').name,
                     "dataType": "blob",
                     "encodingType": "base64/utf-8",
-                    "mimeType": filepath.suffix[1:], #removes the leading period
+                    "mimeType": dv_file.get('filepath').suffix[1:], #removes the leading period
                     "model": args.model, #modify this to the model you want to consume
                     "confidenceInterval": float(args.confidence), #modify this to your liking
                     "isPerformOCR": True, #if set your result will have OCR'd words and bounding boxes
-                    "sizeBytes": len(enc_bytes),
-                    "md5Sum": md5_sum,
-                    "data": enc_string,
+                    "sizeBytes": dv_file.get('length'),
+                    "md5Sum": dv_file.get('md5'),
+                    "dataKey": presignedurl_details['fields']['key'],
                 }
             }
         }
         resp = None
         resp = requests.request(
             method="POST",
-            url=f"{APIADDRESS}", #docuvision/v1/tasks/7",
+            url=f"{APIADDRESS}tasks/", #docuvision/v1/tasks/7",
             headers=headers,
-            data=json.dumps(req),
+            json=req,
             timeout=timeout
         )
         rjson = json.loads(resp.content)
         req_id = rjson.get("id")
         req_meta = rjson.get("metadata", {})
         if 'apiKey' in req_meta.keys(): req_meta['apiKey']='hidden'
-        logging.info(f"Job posted. status={resp.status_code}. id={req_id}. file={filepath.name}. respmeta={req_meta}")
+        logging.info(f"Job posted. status={resp.status_code}. id={req_id}. file={dv_file['filepath'].name}. respmeta={req_meta}")
 
-        if req_id is not None: 
+        if req_id is not None and resp.status_code==200: 
             #write the job id of the newly created job to local file 
             with open('pendingjobs.docuvision', 'a') as f:
-                f.write(f"{req_id} {filepath}\n")
+                f.write(f"{req_id} {dv_file['filepath']}\n")
         return req_id
     except Exception as e:
         logging.error(f"{e}. {resp}")
@@ -187,7 +183,7 @@ def hankai_get_results(jobid):
     headers = {"x-api-key": APITOKEN }
     resp = requests.request(
         method="GET",
-        url=f"{APIADDRESS}{jobid}",
+        url=f"{APIADDRESS}tasks/{jobid}",
         headers=headers
     )
     return resp
@@ -196,6 +192,8 @@ def hankai_get_results(jobid):
 #returns 'completed' if the job is complete, 'inprogress' if not found or in progress, or 'error' if completed but state == error
 def hankai_check_job_complete(jobid, resp):
     try:
+        if resp.status_code==404:
+            return '404error'
         rjson= json.loads(resp.content)
         if (rjson.get("state")):
             logging.debug(f"jobid {jobid} state={rjson.get('state')}")
@@ -210,8 +208,8 @@ def hankai_check_job_complete(jobid, resp):
 
 #STEP 6.
 #writes out the results to a .json file of the form filestem+_jobid.completedstate.json at same location as original file
-def hankai_write_json_results(jobid, document_filepath, apiresponse, completedstate):
-    dfP = Path(document_filepath)
+def hankai_write_json_results(jobid, filepath, apiresponse, completedstate):
+    dfP = Path(filepath)
     jsonfp = dfP.parent / (dfP.stem + f'_{jobid}.{completedstate}.json')
     logging.debug(f"Writing api response for jobid={jobid} to {jsonfp}")
     with open(jsonfp, 'w') as f:
@@ -221,42 +219,55 @@ def hankai_write_json_results(jobid, document_filepath, apiresponse, completedst
 
 #checks if a filepathstem_xxx.completed.json file exists for a given file
 def checkForCompletedJson(filepath):
-    jsonps = filepath.parent.rglob("{}*.json".format(filepath.stem))
+    dfP = Path(filepath)
+    jsonps = dfP.parent.rglob("{}*.json".format(dfP.stem))
     for jsonp in jsonps:
         if jsonp.stem.endswith('.completed'): return 1
     return 0
 
-#%% SUBMIT JOBS
-if args.wtd.upper() in ['POST','BOTH']:
+#loads the file at filepath and base64 encodes it, returning a dictionary of items needed for posting to docuvision API
+def loadFile(filepath):
+    with open(filepath, 'rb') as f: doc_contents = f.read()
+    doc_md5 = hashlib.md5(doc_contents).hexdigest()
+    doc_base64 = base64.b64encode(doc_contents)
+    doc_length = len(doc_contents)
+    logging.debug(f"File loaded. {filepath}")
+    return {'filepath': Path(filepath), 'contents': doc_contents, 'base64encoded':doc_base64, 'md5': doc_md5, 'length': doc_length}
+
+#pendingjobs is a list of {jobid, filepath} objects that are still pending (optional)
+def postJobs(args, pendingjobs=[]):
     #go through each filetype in the directory, recursively (thus rglob), and send files to the api
     dirP = Path(args.dir+'/')
     newjobids = []
+    pendingjobs_filepaths = [x.get('filepath') for x in pendingjobs]
     logging.info("SEND documents for processing requested. Starting ...")
     for type in args.types.split(','):
         files = list(dirP.rglob(f"*.{type}"))
         logging.info("Processing {:,} {}s in {} ...".format(len(files), type, args.dir))
         for file in files:
             # if we weren't asked to reprocess all files AND if a completed json file already exists, move on to next file for processing
-            if not args.reprocess and checkForCompletedJson(file):
-                logging.debug(f"Skipping already processed file {file.name}")
-                continue
+            if not args.reprocess:
+                if checkForCompletedJson(file):
+                    logging.debug(f"Skipping already processed file. {file.name}")
+                    continue
+                if file in pendingjobs_filepaths:
+                    logging.debug(f"Skipping file already sent, in pending state. {file.name}")
+                    continue
             logging.info(f"Processing {file.name}")
+            #load the file bytes and hash it
+            dv_file = loadFile(file)
             #step 1. get presigned url for s3 file upload
-            surl = hankai_get_presigned_url()
-            if surl is None: continue #failed to get signed url. go to next file
+            presignedurl_details = hankai_get_presigned_url()
+            if presignedurl_details is None: continue #failed to get signed url. go to next file
             #step 2.
-            if not hankai_post_file(file, surl): continue #failed to post file to signed url. go to next file
+            if not hankai_post_file(dv_file, presignedurl_details): continue #failed to post file to signed url. go to next file
             #step 3. 
-            jobid = hankai_submit_job(file)
+            jobid = hankai_submit_job(dv_file, presignedurl_details, args)
             if jobid is not None:
                 newjobids.append(jobid)
         logging.info(f"Done sending {type}s from {args.dir}.")
 
-#%% CHECK FOR JOB RESULTS
-
-#if you're testing and want to change the loglevel dynamically use something like this
-# logging.getLogger().setLevel(logging.DEBUG)
-if args.wtd.upper() in ['GET','BOTH']:
+def getJobs(args, retries=0, retrydelay=60):
     logging.info("GET document results requested. Starting ...")
     pendingjobs = []
     #read in the 'pendingjobs.docuvision' file and get in-progress (jobid filepath) from it
@@ -265,6 +276,7 @@ if args.wtd.upper() in ['GET','BOTH']:
     if not pendingjobfileP.exists():
         logging.info("No pending inprogress jobs to process")
     else:
+        #open up the pendingjobs.docuvision file and load up jobs we are waiting on
         with open(pendingjobfileP, 'r') as f:
             for line in f.readlines():
                 if line.strip()=="": continue #skip empty lines
@@ -272,8 +284,8 @@ if args.wtd.upper() in ['GET','BOTH']:
                 jobid, filepath = line.split(" ", 1)
                 pendingjobs.append({'jobid':jobid, 'filepath':filepath.strip()})
 
-        MAXRETRIES = 10
-        RETRYDELAY = 30
+        MAXRETRIES = retries+1
+        RETRYDELAY = retrydelay
         logging.info("{:,} pending jobs still in progress. Checking on them now ...".format(len(pendingjobs)))
 
         for i in range(1, MAXRETRIES+1):
@@ -298,6 +310,22 @@ if args.wtd.upper() in ['GET','BOTH']:
                 break
             logging.info(f"Sleeping for {RETRYDELAY} seconds then trying again. Try #{i} of {MAXRETRIES}.")
             time.sleep(RETRYDELAY)
+    return pendingjobs 
+
+
+if args.wtd.upper() == 'BOTH' and not args.reprocess:
+    pendingjobs = getJobs(args, retries=0, retrydelay=30) #try to get any finished jobs first
+
+#%% SUBMIT JOBS
+if args.wtd.upper() in ['POST','BOTH']:
+    postJobs(args)
+
+#%% CHECK FOR JOB RESULTS
+#if you're testing and want to change the loglevel dynamically use something like this
+# logging.getLogger().setLevel(logging.DEBUG)
+if args.wtd.upper() in ['GET','BOTH']:
+    getJobs(args, retries=2, retrydelay=30)
+
 
 
 
