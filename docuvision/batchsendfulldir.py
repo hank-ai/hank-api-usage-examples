@@ -69,11 +69,11 @@ logging.info("Processing {} filetypes in {} ...".format(args.types, args.dir))
 #%% SETUP AUTH
 #make sure token and address are set in env vars (will use the default address here if not)
 APIADDRESS = os.environ.get('DOCUVISION_API_ADDRESS', 
-    #https://services.hank.ai/docuvision/v1/") #PROD
-    "https://services-dev.hank.ai/docuvision/v1/") #DEV
+    "https://services.hank.ai/docuvision/v1/") #PROD
+    #"https://services-dev.hank.ai/docuvision/v1/") #DEV
 
-#APITOKEN = os.environ.get('DOCUVISION_API_TOKEN', None) #PROD
-APITOKEN = os.environ.get('DOCUVISION_API_TOKEN_DEV', None) #DEV
+APITOKEN = os.environ.get('DOCUVISION_API_TOKEN', None) #PROD
+#APITOKEN = os.environ.get('DOCUVISION_API_TOKEN_DEV', None) #DEV
 
 if APITOKEN is None:
     logging.error("DOCUVISION_API_TOKEN environment variable is not set. Aborting")
