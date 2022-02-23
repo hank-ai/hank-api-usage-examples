@@ -15,10 +15,9 @@
 #   - Set 'DOCUVISION_API_TOKEN' to the token given to you by hank.ai during signup
 #   - Set 'DOCUVISION_API_ADDRESS' to the url given to you by hank.ai during signup
 # - Python 3.7.7 or greater installed
-#   - boto3 'pip install boto3' (this is aws' library for interacting with s3. needed for uploading files to the signed url returned by first api call)
 # Args: (command line args. ex: python batchsendfulldir.py --types pdf --dir c:/test/ --loglevel DEBUG)
 # - --types: pdf, png, or jpg. may include up to all 3 seperated by a comma. default=pdf,jpg,png
-# - --dir: full path to a directory on the current machine you'd like to post to DocuVision API. default=current directory
+# - --dir: full or relative path to a directory on the current machine you'd like to post to DocuVision API. default=current directory
 # - --loglevel: how verbose you want to logging to be to the docuvision.log file
 # Results:
 # - will save a .json file alongside each item posted to the DocuVision API once results are received
@@ -32,7 +31,7 @@
 
 
 import requests, hashlib, json, os, logging, sys, datetime, argparse, time
-from pathlib import Path
+from pathlib import Path, PurePath
 from encodings.base64_codec import base64
 
 #get command line parameters passed
@@ -237,7 +236,9 @@ def loadFile(filepath):
 #pendingjobs is a list of {jobid, filepath} objects that are still pending (optional)
 def postJobs(args, pendingjobs=[]):
     #go through each filetype in the directory, recursively (thus rglob), and send files to the api
-    dirP = Path(args.dir+'/')
+    #dirP = Path(args.dir+'/')
+    dirP = Path(PurePath(Path.cwd(), args.dir)) #will allow for relative paths AND absolute paths
+
     newjobids = []
     pendingjobs_filepaths = [x.get('filepath') for x in pendingjobs]
     logging.info("SEND documents for processing requested. Starting ...")
@@ -250,7 +251,7 @@ def postJobs(args, pendingjobs=[]):
                 if checkForCompletedJson(file):
                     logging.debug(f"Skipping already processed file. {file.name}")
                     continue
-                if file in pendingjobs_filepaths:
+                if str(file) in pendingjobs_filepaths:
                     logging.debug(f"Skipping file already sent, in pending state. {file.name}")
                     continue
             logging.info(f"Processing {file.name}")
@@ -302,33 +303,38 @@ def getJobs(args, retries=0, retrydelay=60):
 
             logging.info("{:,} jobs still in progress.".format(len(pendingjobs)))
             #overwrite the pending jobs file with the ones still pending
-            logging.debug("Writing pending jobs ({}) still in progress to pendingjobs.docuvision ...".format([x['jobid'] for x in pendingjobs]))
+            if len(pendingjobs)>0: logging.debug("Writing pending jobs ({}) still in progress to pendingjobs.docuvision ...".format([x['jobid'] for x in pendingjobs]))
             with open(pendingjobfileP, 'w') as f:
                 for pj in pendingjobs:
                     f.write(f"{pj['jobid']} {pj['filepath']}\n")
             if len(pendingjobs)==0:
                 break
-            logging.info(f"Sleeping for {RETRYDELAY} seconds then trying again. Try #{i} of {MAXRETRIES}.")
-            time.sleep(RETRYDELAY)
+            if i+1 < MAXRETRIES:
+                logging.info(f"Sleeping for {RETRYDELAY} seconds then trying again. Try #{i} of {MAXRETRIES-1}.")
+                time.sleep(RETRYDELAY)
     return pendingjobs 
 
 
+pendingjobs = []
+
 if args.wtd.upper() == 'BOTH' and not args.reprocess:
-    pendingjobs = getJobs(args, retries=0, retrydelay=30) #try to get any finished jobs first
+    pendingjobs = getJobs(args, retries=0, retrydelay=5) #try to get any finished jobs first
 
 #%% SUBMIT JOBS
 if args.wtd.upper() in ['POST','BOTH']:
-    postJobs(args)
+    postJobs(args, pendingjobs)
 
 #%% CHECK FOR JOB RESULTS
 #if you're testing and want to change the loglevel dynamically use something like this
 # logging.getLogger().setLevel(logging.DEBUG)
 if args.wtd.upper() in ['GET','BOTH']:
-    getJobs(args, retries=2, retrydelay=30)
+    pendingjobs = getJobs(args, retries=5, retrydelay=60)
 
 
 
-
+if len(pendingjobs)>0:
+    print("{:,} jobs still pending {}".format(len(pendingjobs), pendingjobs))
+    logging.warning("{:,} jobs still pending {}".format(len(pendingjobs), pendingjobs))
 logging.info("DOCUVISION SCRIPT COMPLETE")
 print("DOCUVISION SCRIPT COMPLETE")
 
