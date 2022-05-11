@@ -74,8 +74,13 @@ APIADDRESS = os.environ.get('DOCUVISION_API_ADDRESS',
 APITOKEN = os.environ.get('DOCUVISION_API_TOKEN', None) #PROD
 #APITOKEN = os.environ.get('DOCUVISION_API_TOKEN_DEV', None) #DEV
 
+SERVICE_NAME = os.environ.get('DOCUVISION_SERVICE_NAME', None) #PROD
+
 if APITOKEN is None:
     logging.error("DOCUVISION_API_TOKEN environment variable is not set. Aborting")
+    sys.exit()
+if SERVICE_NAME is None:
+    logging.error('DOCUVISION_SERVICE_NAME environment variable is not set. Aborting")
     sys.exit()
 if APIADDRESS is None:
     logging.error("DOCUVISION_API_ADDRESS environment variable is not set. Aborting")
@@ -138,6 +143,7 @@ def hankai_submit_job(dv_file, presignedurl_details, args, timeout=60):
         req = {
             #"name": "customername_job_x",
             "request": {
+                "service": SERVICE_NAME,
                 "document": {
                     "name": dv_file.get('filepath').name,
                     "dataType": "blob",
