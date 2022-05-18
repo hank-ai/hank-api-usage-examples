@@ -80,7 +80,7 @@ if APITOKEN is None:
     logging.error("DOCUVISION_API_TOKEN environment variable is not set. Aborting")
     sys.exit()
 if SERVICE_NAME is None:
-    logging.error('DOCUVISION_SERVICE_NAME environment variable is not set. Aborting")
+    logging.error("DOCUVISION_SERVICE_NAME environment variable is not set. Aborting")
     sys.exit()
 if APIADDRESS is None:
     logging.error("DOCUVISION_API_ADDRESS environment variable is not set. Aborting")
@@ -141,7 +141,7 @@ def hankai_submit_job(dv_file, presignedurl_details, args, timeout=60):
     try:
         headers = {"x-api-key": APITOKEN }
         req = {
-            #"name": "customername_job_x",
+            "name": "customername_job_x",
             "request": {
                 "service": SERVICE_NAME,
                 "document": {
