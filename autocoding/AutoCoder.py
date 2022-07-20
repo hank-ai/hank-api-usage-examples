@@ -12,7 +12,7 @@
 #   - Set 'HANK_AUTOCODING_API_TOKEN' to the token given to you by hank.ai during signup
 #   - Set 'HANK_AUTOCODING_API_ADDRESS' to the url given to you by hank.ai during signup
 # - Python 3.7.7 or greater installed
-#   - pandas, numpy, requests
+#   - pandas, numpy, requests, dateparser
 #
 # Notes:
 # - If you use the dataframe based functions here we will still use temporary .json result files in case something bombs it can still pickup where it left off
@@ -21,7 +21,7 @@
 
 import pandas as pd
 import numpy as np 
-import requests, json, os, logging, datetime, time
+import requests, json, os, logging, datetime, time, dateparser
 from pathlib import Path
 from tqdm import tqdm
 tqdm.pandas()
@@ -44,12 +44,16 @@ if APIADDRESS[-1] != "/": APIADDRESS+="/"
 
 #static class (other than logger)
 class AutoCoder: 
-    def __init__(self, APITOKEN=None, APIADDRESS="https://services.hank.ai/autocoding/v1/", 
-        logfile='autocoding.log', debuglevel="DEBUG", df_mapping=None, resultsdir = "results"):
+    def __init__(self, APITOKEN=APITOKEN, APIADDRESS=APIADDRESS, 
+        logfile='autocoding.log', debuglevel="DEBUG", df_mapping=None, 
+        resultsdir = "results", buvfile="CROSSWALKs-ALL.csv"):
 
         self.APITOKEN = APITOKEN
         self.APIADDRESS = APIADDRESS
-
+        self.asabuvdf = pd.DataFrame()
+        if Path(buvfile).exists():
+            self.asabuvdf = pd.read_csv(buvfile, dtype={'CPT Anesthesia Code':str})
+            
         #this dict is used if you are calling hankai_submit_jobs_dataframe to map the dataframe column names (on the right) to the autocoding class keys
         if df_mapping is not None: self.df_mapping = df_mapping
         else: 
@@ -58,8 +62,8 @@ class AutoCoder:
                 "SurgeryDescription": "SurgeryDescription", #short surgical description. optional, but recommended
                 "DiagnosisDescription": "DiagnosisDescription", #short diagnosis description representing indication for procedure. optional, but recommended
                 "ASAStatus": "ASAStatus", #asa disease status classification (1->6). optional, but recommended
-                "PatientDOB": "PatientDOB", #patient's dob. format expected "YYYY-MM-DD HH:MM:SS". optional, but recommended
-                "PatientSex": "PatientSex", #Male or Female. optinoal, but recommended
+                "PatientDOB": "PatientDOB", #patient's dob. format expected "YYYY-MM-DD HH:MM:SS". optional, but strongly recommended
+                "PatientSex": "PatientSex", #Male or Female. optional, but recommended
                 "InsuranceCompany": "InsuranceCompany", #name of the patient's insurance company. optional
                 "SurgeonName": "SurgeonName", #name of the surgeon, typically "Last, First MD" or similar
                 "Emergency": "Emergency", #0 or 1. is this surgery classified as an emergency. optional
@@ -124,12 +128,14 @@ class AutoCoder:
     #submit all rows in a dataframe as jobs to the autocoder
     #will use the self.df_mappings to map autocoder fields to the columns in your dataframe so modify those mappings based upon your dataframe
     #returns a pd.Series object that contains the jobids returned from the server
-    def hankai_submit_job_dataframe(self, df, reprocess_completed_cases=False, timeout=60, quiet=True):
+    def hankai_submit_job_dataframe(self, df, reprocess_completed_cases=False, timeout=60, quiet=True, checkFirst=True):
+        if checkFirst: self.getJobs()
         df = df.copy()
         df['processed']=0
         if not reprocess_completed_cases:
             df['processed'] = df[self.df_mapping['CaseID']].apply(self.checkForCompletedCase)
         payloads = df[df['processed']==0].apply(lambda r: AutoCoder.createRequest(self._autocodingMapper(r)), axis=1)
+        if len(payloads)==0: return np.nan
         return payloads.progress_apply(lambda x: self.hankai_submit_job(x, quiet=quiet))
 
 
@@ -232,25 +238,43 @@ class AutoCoder:
             df['autocoding_cpt_conf'] = cpt_ents.apply(lambda x: x['confidence'] if not pd.isnull(x) and 'confidence' in x.keys() else np.nan)
             df['autocoding_asa_code'] = asa_ents.apply(lambda x: x['entityValue'] if not pd.isnull(x) and 'entityValue' in x.keys() else np.nan)
             df['autocoding_asa_conf'] = asa_ents.apply(lambda x: x['confidence'] if not pd.isnull(x) and 'confidence' in x.keys() else np.nan)
+            df['autocoding_asa_buv'] = df.apply(lambda r: 
+                self.buLookup(r['autocoding_asa_code'], year=r['DateOfService'], quiet=1), axis=1)
+
             df['autocoding_icd10_code'] = icd_ents.apply(lambda x: x['entityValue'] if not pd.isnull(x) and 'entityValue' in x.keys() else np.nan)
             df['autocoding_icd10_conf'] = icd_ents.apply(lambda x: x['confidence'] if not pd.isnull(x) and 'confidence' in x.keys() else np.nan)
-        return df
-        
 
+        return df
+
+    #lookup anesthesia base units. asa = an asa cpt code as a string or int
+    #returns -1 if asa code not found
+    def buLookup(self, asa, year=2022, quiet=True):
+        if not quiet: print('Looking up {} for {} in buLookup'.format(asa, year))
+        try:
+            if isinstance(year, str): year = year[:4]
+            qdf = self.asabuvdf[(self.asabuvdf['Year']==int(year)) & (self.asabuvdf['CPT Anesthesia Code']==str(asa).zfill(5))]['Base Unit Value']
+            if not quiet: print(qdf)
+            if len(qdf)>0: return int(qdf.iloc[0]) if not asa == 0 else -1
+        except IOError:
+            return -1
+        return -1
+            
     ################ STATIC STUFF ###############
     sample_case_datas = [
         {
             "CaseID": "ABC123",
             "SurgeryDescription":"Left total hip arthroplasty complete (C-ARM)",
             "DiagnosisDescription":"hip pain and arthritis",
+            'SurgeonProcedureNote': "an incision was made over the left hip and a 7.0 prosthesis was inserted. wound irrigated and then closed with 2.0 vicryl. patient was under general anesthesia.",
+            "AnesthesiaProcedureNote": "Procedure Type: Nerve block\nSide: Left\nLocation: Fascia Iliaca\nNeedle Type: 22g stimuplex",
             "ASAStatus": "3",
-            "PatientDOB":"1972-03-19 00:00:00",
+            "PatientDOB":"1972-03-19",
             "PatientSex":"Female",
             "InsuranceCompany":"Commercial Insurance",
             "SurgeonName":"Cutter, Jimmy MD",
             "Emergency":"0",
-            "CaseStartTime": "2020-10-30 11:19:00",
-            "DateOfService": "2020-10-30 00:00:00"
+            "CaseStartTime": "2020-10-30 7:19 pm",
+            "DateOfService": "2020-10-30"
         },
         {
             "CaseID": "DEF456",
@@ -276,6 +300,13 @@ class AutoCoder:
             #"lastModifiedTime": "2021-05-13 14:45:49"
         }
 
+    #attempts to take any datestr and convert it to hank format, YYYY-MM-DD HH:MM:SS
+    def _correctDateFormat(datestr):
+        try:
+            return dateparser.parse(datestr, settings={'PREFER_DATES_FROM':'past'}).strftime("%Y-%m-%d %H:%M:%S")
+        except IOError:
+            return datestr
+
     # takes a one-level dictionary with keys that hold values to be formatted into the autocoding spec format
     # returns the payload in the format expected by hankai_submit_job(...)
     def createRequest(caseInfo):
@@ -291,7 +322,7 @@ class AutoCoder:
                     },
                     "patient_info": {
                         "patient": {
-                            "dob": caseInfo.get("PatientDOB"),
+                            "dob": AutoCoder._correctDateFormat(caseInfo.get("PatientDOB")),
                             "sex": caseInfo.get("PatientSex")
                         },
                         "insurance": [
@@ -300,8 +331,8 @@ class AutoCoder:
                     },
                     "schedule": {
                         "asa": caseInfo.get("ASAStatus"),
-                        "date": caseInfo.get("DateOfService"),
-                        "startTime": caseInfo.get("CaseStartTime"),
+                        "date": AutoCoder._correctDateFormat(caseInfo.get("DateOfService")),
+                        "startTime": AutoCoder._correctDateFormat(caseInfo.get("CaseStartTime")),
                         "emergent": caseInfo.get("Emergency")
                     }
                 }
@@ -377,23 +408,26 @@ class AutoCoder:
 #################################
 #### SAMPLE CODE FOR TESTING ####
 #################################
-#instantiate the AutoCoder class object with an apitoken and (optional) api endpoint address
-ac = AutoCoder(APITOKEN=APITOKEN, APIADDRESS=APIADDRESS)
-#create a pandas dataframe using sample data included in the class
-df = pd.DataFrame(ac.sample_case_datas)
-#attempt to load any existing results stored locally in results/ to the dataframe
-df = ac.loadResultsToDataframe(df)
-#submit the cases in the dataframe for autocoding
-ac.getJobs(retries=-1, retrydelay=10, quiet=False)
-df['autocoding_jobid_justsent'] = ac.hankai_submit_job_dataframe(df, quiet=0, reprocess_completed_cases=0)
-#retrieve the results for the posted jobs and store them locally as .json files in results/
-ac.getJobs(retries=-1, retrydelay=10, quiet=False)
-#load results stored locally in results/ to the dataframe
-df = ac.loadResultsToDataframe(df)
-df
-
-#%%
-
+def main():
+    #instantiate the AutoCoder class object with an apitoken and (optional) api endpoint address
+    ac = AutoCoder(APITOKEN=APITOKEN, APIADDRESS=APIADDRESS)
+    #create a pandas dataframe using sample data included in the class
+    df = pd.DataFrame(ac.sample_case_datas)
+    #attempt to load any existing results stored locally in results/ to the dataframe
+    df = ac.loadResultsToDataframe(df)
+    #submit the cases in the dataframe for autocoding
+    df['autocoding_jobid_justsent'] = ac.hankai_submit_job_dataframe(
+        df, quiet=0, reprocess_completed_cases=0, checkFirst=True)
+    #retrieve the results for the posted jobs and store them locally as .json files in results/
+    ac.getJobs(retries=-1, retrydelay=10, quiet=False)
+    #load results stored locally in results/ to the dataframe
+    df = ac.loadResultsToDataframe(df)
+    display(df)
+    
+if __name__ == "__main__":
+    df = main()
+    logging.info("AUTOCODING SCRIPT COMPLETE")
+    print("AUTOCODING SCRIPT COMPLETE")
 
 # if len(pendingjobs)>0:
 #     print("{:,} jobs still pending {}".format(len(pendingjobs), pendingjobs))
@@ -406,8 +440,8 @@ df
 #         jobids.append(ac.hankai_submit_job(payload))
 #     return jobids
 
-logging.info("AUTOCODING SCRIPT COMPLETE")
-print("AUTOCODING SCRIPT COMPLETE")
+
 
 #%%
 
+# %%
