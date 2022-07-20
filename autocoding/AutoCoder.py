@@ -18,6 +18,7 @@
 # - If you use the dataframe based functions here we will still use temporary .json result files in case something bombs it can still pickup where it left off
 # Resources:
 # 
+
 import pandas as pd
 import numpy as np 
 import requests, json, os, logging, datetime, time
@@ -365,21 +366,13 @@ class AutoCoder:
     #jsonresp is a full json object response from the autocoding api
     #returns the first entity from the entities that matches type==codetype
     def getTopCode(codetype, jsonresp):
-        for e in jsonresp['response']['result']['entities']:
-            if 'type' in e.keys() and e['type'].lower() == codetype.lower():
-                return e
+        try:
+            for e in jsonresp['response']['result']['entities']:
+                if 'type' in e.keys() and e['type'].lower() == codetype.lower():
+                    return e
+        except:
+            return np.nan
 
-
-
-#df['autocoding_jobid'] = df['jsondictforautocing'].apply(lambda x: hankai_submit_job(createRequest(x)), axis=1)
-
-#ac = an AutoCoder object
-def postJobs(ac, sample_case_datas):
-    jobids = []
-    for case_data in AutoCoder.sample_case_datas:
-        payload = AutoCoder.createRequest(case_data)
-        jobids.append(ac.hankai_submit_job(payload))
-    return jobids
 
 #################################
 #### SAMPLE CODE FOR TESTING ####
@@ -391,41 +384,28 @@ df = pd.DataFrame(ac.sample_case_datas)
 #attempt to load any existing results stored locally in results/ to the dataframe
 df = ac.loadResultsToDataframe(df)
 #submit the cases in the dataframe for autocoding
-df['autocoding_jobid_justsent'] = ac.hankai_submit_job_dataframe(df, quiet=0, reprocess_completed_cases=1)
+ac.getJobs(retries=-1, retrydelay=10, quiet=False)
+df['autocoding_jobid_justsent'] = ac.hankai_submit_job_dataframe(df, quiet=0, reprocess_completed_cases=0)
 #retrieve the results for the posted jobs and store them locally as .json files in results/
 ac.getJobs(retries=-1, retrydelay=10, quiet=False)
 #load results stored locally in results/ to the dataframe
-ac.loadResultsToDataframe(df)
-
-
-
-#%%
-
-
-#%%
-def pulloutcodes(row):
-    cpt = row['codingresults'].get('surgCPT')
-    asa = cpt = row['codingresults'].get('anesCPT')
-    return cpt, asa
-#df[['predictedcpt', 'predictedasa']] = df.apply(pulloutcodes, axis=1, result_type="expand")
-
+df = ac.loadResultsToDataframe(df)
+df
 
 #%%
 
-postJobs(ac, sample_case_datas)
 
+# if len(pendingjobs)>0:
+#     print("{:,} jobs still pending {}".format(len(pendingjobs), pendingjobs))
+#     logging.warning("{:,} jobs still pending {}".format(len(pendingjobs), pendingjobs))
+#ac = an AutoCoder object
+# def postJobs(ac, sample_case_datas):
+#     jobids = []
+#     for case_data in AutoCoder.sample_case_datas:
+#         payload = AutoCoder.createRequest(case_data)
+#         jobids.append(ac.hankai_submit_job(payload))
+#     return jobids
 
-#%%
-
-pendingjobs = []
-pendingjobs = ac.getJobs(retries=5, retrydelay=5) #try to get any finished jobs first
-
-
-
-
-if len(pendingjobs)>0:
-    print("{:,} jobs still pending {}".format(len(pendingjobs), pendingjobs))
-    logging.warning("{:,} jobs still pending {}".format(len(pendingjobs), pendingjobs))
 logging.info("AUTOCODING SCRIPT COMPLETE")
 print("AUTOCODING SCRIPT COMPLETE")
 
