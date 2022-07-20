@@ -290,7 +290,7 @@ def getJobs(args, retries=0, retrydelay=60):
         logging.info("{:,} pending jobs still in progress. Checking on them now ...".format(len(pendingjobs)))
 
         for i in range(1, MAXRETRIES+1):
-            for pj in pendingjobs:
+            for pj in pendingjobs.copy():
                 time.sleep(1) #don't destroy the api
                 logging.debug("Retrieving jobid {}".format(pj['jobid']))
                 res = hankai_get_results(pj['jobid'])

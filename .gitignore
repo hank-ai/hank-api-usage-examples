@@ -1,4 +1,7 @@
 samples/
+pendingjobs.docuvision
+pendingjobs.autocoding
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
