@@ -140,21 +140,20 @@ class AutoCoder:
 
 
     #gets the api results for a given jobid
-    def hankai_get_results(self, jobid, timeout=10):
+    def hankai_get_results(self, jobid):
         logging.debug("Getting {}{}".format(self.APIADDRESS, jobid))
         headers = {"x-api-key": self.APITOKEN }
         resp = requests.request(
             method="GET",
             url=f"{self.APIADDRESS}tasks/{jobid}",
-            headers=headers,
-            timeout=timeout
+            headers=headers
         )
         return resp
 
     #looks for pending autocoding jobs in the pending.autocoding file and then queries the server for status
     # if status is completed, will save the results to a .json file inside self.resultsdir directory
     # set retries to -1 to check indefinitely (technically 5,000 times) until all results are completed
-    def getJobs(self, retries=0, retrydelay=60, quiet=True, timeout=20, pauseBetweenRequests=0):
+    def getJobs(self, retries=0, retrydelay=60, quiet=True):
         logging.info("GET autocoding results requested. Starting ...")
         pendingjobs = []
         #read in the 'pendingjobs.autocoding' file and get in-progress (jobid CaseID) from it
@@ -178,9 +177,9 @@ class AutoCoder:
 
             for i in range(1, MAXRETRIES+1):
                 for pj in pendingjobs.copy():
-                    time.sleep(pauseBetweenRequests) #don't destroy the api
+                    time.sleep(1) #don't destroy the api
                     logging.debug("Retrieving jobid {}".format(pj['jobid']))
-                    res = self.hankai_get_results(pj['jobid'], timeout=timeout)
+                    res = self.hankai_get_results(pj['jobid'])
                     completedstate = AutoCoder.hankai_check_job_complete(pj['jobid'], res)
                     if completedstate in ['completed', 'error']:
                         print(f"Jobid {pj['jobid']} complete! state={completedstate}")
@@ -221,17 +220,15 @@ class AutoCoder:
     #entity is true or false. 
     #  if true, will add autocoding_*_entity columns to the df that contain the full entity 
     #  if false, will add 2 columns for each code type. one holding the code, the other holding the confidence
-    def loadResultsToDataframe(self, df, entity=False, quiet=False):
+    def loadResultsToDataframe(self, df, entity=False):
         cr = df.progress_apply(lambda r: self.loadCaseResults(r[self.df_mapping['CaseID']]), result_type='expand', axis=1)
         responses = cr[0]
         filenames = cr[1]
-        logging.info("Loading autocoding results for dataframe of length {:,}".format(len(df)))
-        if not quiet: print("Loading autocoding results for dataframe, length={:,} ...".format(len(df)))
         df['autocoding_jobid'] = responses.apply(lambda x: x['id'] if not pd.isnull(x) and 'id' in x.keys() else np.nan)
         df['autocoding_result_filename'] = filenames
-        cpt_ents = responses.progress_apply(AutoCoder.getTopCPT)
-        asa_ents = responses.progress_apply(AutoCoder.getTopASA)
-        icd_ents = responses.progress_apply(AutoCoder.getTopICD)
+        cpt_ents = responses.apply(AutoCoder.getTopCPT)
+        asa_ents = responses.apply(AutoCoder.getTopASA)
+        icd_ents = responses.apply(AutoCoder.getTopICD)
         if entity:
             df['autocoding_cpt_entity'] = cpt_ents
             df['autocoding_asa_entity'] = asa_ents
@@ -241,12 +238,12 @@ class AutoCoder:
             df['autocoding_cpt_conf'] = cpt_ents.apply(lambda x: x['confidence'] if not pd.isnull(x) and 'confidence' in x.keys() else np.nan)
             df['autocoding_asa_code'] = asa_ents.apply(lambda x: x['entityValue'] if not pd.isnull(x) and 'entityValue' in x.keys() else np.nan)
             df['autocoding_asa_conf'] = asa_ents.apply(lambda x: x['confidence'] if not pd.isnull(x) and 'confidence' in x.keys() else np.nan)
-            if not quiet: print("Looking up base units ...")
-            df['autocoding_asa_buv'] = df.progress_apply(lambda r: 
-                self.buLookup(r['autocoding_asa_code'], year=r[self.df_mapping['DateOfService']], quiet=1), axis=1)
+            df['autocoding_asa_buv'] = df.apply(lambda r: 
+                self.buLookup(r['autocoding_asa_code'], year=r['DateOfService'], quiet=1), axis=1)
+
             df['autocoding_icd10_code'] = icd_ents.apply(lambda x: x['entityValue'] if not pd.isnull(x) and 'entityValue' in x.keys() else np.nan)
             df['autocoding_icd10_conf'] = icd_ents.apply(lambda x: x['confidence'] if not pd.isnull(x) and 'confidence' in x.keys() else np.nan)
-        logging.info("Done loading autocoding results.")
+
         return df
 
     #lookup anesthesia base units. asa = an asa cpt code as a string or int
@@ -254,14 +251,14 @@ class AutoCoder:
     def buLookup(self, asa, year=2022, quiet=True):
         if not quiet: print('Looking up {} for {} in buLookup'.format(asa, year))
         try:
-            if 1 or isinstance(year, (str, np.datetime64)): year = dateparser.parse(str(year), settings={'PREFER_DATES_FROM':'past'}).year
+            if isinstance(year, str): year = year[:4]
             qdf = self.asabuvdf[(self.asabuvdf['Year']==int(year)) & (self.asabuvdf['CPT Anesthesia Code']==str(asa).zfill(5))]['Base Unit Value']
             if not quiet: print(qdf)
             if len(qdf)>0: return int(qdf.iloc[0]) if not asa == 0 else -1
         except IOError:
             return -1
         return -1
-
+            
     ################ STATIC STUFF ###############
     sample_case_datas = [
         {
@@ -297,7 +294,7 @@ class AutoCoder:
     #returns an entity dict for the payload object in createRequest(...) from key:value pairs 
     def _createEntity(key, value):
         return {
-            "content":value if not pd.isnull(value) else "",
+            "content":value,
             "noteType":key,
             "inputType":"text",
             #"lastModifiedTime": "2021-05-13 14:45:49"
@@ -306,46 +303,42 @@ class AutoCoder:
     #attempts to take any datestr and convert it to hank format, YYYY-MM-DD HH:MM:SS
     def _correctDateFormat(datestr):
         try:
-            return dateparser.parse(str(datestr), settings={'PREFER_DATES_FROM':'past'}).strftime("%Y-%m-%d %H:%M:%S")
-        except:
+            return dateparser.parse(datestr, settings={'PREFER_DATES_FROM':'past'}).strftime("%Y-%m-%d %H:%M:%S")
+        except IOError:
             return datestr
 
     # takes a one-level dictionary with keys that hold values to be formatted into the autocoding spec format
     # returns the payload in the format expected by hankai_submit_job(...)
     def createRequest(caseInfo):
-        try:
-            entities = ["SurgeryDescription", "DiagnosisDescription", "SurgeonProcedureNote","AnesthesiaProcedureNote"]
-            payload = {
-                #"id":Null,
-                "name":caseInfo.get("CaseID"),
-                "request": {
-                    "service":"autocoding-1",
-                    "job":{
-                        "input":{
-                            "entities":[AutoCoder._createEntity(k,v) for k,v in caseInfo.items() if k in entities]
+        entities = ["SurgeryDescription", "DiagnosisDescription", "SurgeonProcedureNote","AnesthesiaProcedureNote"]
+        payload = {
+            #"id":Null,
+            "name":caseInfo.get("CaseID"),
+            "request": {
+                "service":"autocoding-1",
+                "job":{
+                    "input":{
+                        "entities":[AutoCoder._createEntity(k,v) for k,v in caseInfo.items() if k in entities]
+                    },
+                    "patient_info": {
+                        "patient": {
+                            "dob": AutoCoder._correctDateFormat(caseInfo.get("PatientDOB")),
+                            "sex": caseInfo.get("PatientSex")
                         },
-                        "patient_info": {
-                            "patient": {
-                                "dob": AutoCoder._correctDateFormat(caseInfo.get("PatientDOB")),
-                                "sex": caseInfo.get("PatientSex")
-                            },
-                            "insurance": [
-                                {"company": caseInfo.get("InsuranceCompany")}
-                            ]
-                        },
-                        "schedule": {
-                            "asa": caseInfo.get("ASAStatus"),
-                            "date": AutoCoder._correctDateFormat(caseInfo.get("DateOfService")),
-                            "startTime": AutoCoder._correctDateFormat(caseInfo.get("CaseStartTime")),
-                            "emergent": caseInfo.get("Emergency")
-                        }
+                        "insurance": [
+                            {"company": caseInfo.get("InsuranceCompany")}
+                        ]
+                    },
+                    "schedule": {
+                        "asa": caseInfo.get("ASAStatus"),
+                        "date": AutoCoder._correctDateFormat(caseInfo.get("DateOfService")),
+                        "startTime": AutoCoder._correctDateFormat(caseInfo.get("CaseStartTime")),
+                        "emergent": caseInfo.get("Emergency")
                     }
                 }
             }
-            return payload
-        except Exception as e: 
-            logging.error(e)
-            return {}
+        }
+        return payload
 
     #checks if a filepathstem_xxx.completed.json file exists for a given file
     def checkForCompletedJson(filepath):
@@ -431,10 +424,10 @@ def main():
     df = ac.loadResultsToDataframe(df)
     display(df)
     
-# if __name__ == "__main__":
-#     df = main()
-#     logging.info("AUTOCODING SCRIPT COMPLETE")
-#     print("AUTOCODING SCRIPT COMPLETE")
+if __name__ == "__main__":
+    df = main()
+    logging.info("AUTOCODING SCRIPT COMPLETE")
+    print("AUTOCODING SCRIPT COMPLETE")
 
 # if len(pendingjobs)>0:
 #     print("{:,} jobs still pending {}".format(len(pendingjobs), pendingjobs))
